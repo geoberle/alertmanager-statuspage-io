@@ -19,11 +19,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	alertprocessor "alertmanager-statuspage-io/alertprocessor"
 )
 
 type Options struct {
@@ -40,26 +44,52 @@ func main() {
 	}
 
 	var opts Options
-	cmd.Flags().IntVar(&opts.listenPort, "port", 1234, "The port to listen on for Alertmanager notifications")
+	cmd.Flags().IntVar(&opts.listenPort, "port", 1236, "The port to listen on for Alertmanager notifications")
 
-	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("listen on port %v\n", opts.listenPort)
-		// todo start listing on alertmanager notifications
-		return nil
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		processor, err := alertprocessor.NewAlertProcessor()
+		if err != nil {
+			log.Fatalf("Failed to create alert process: %s", err)
+		}
+
+		mux := http.NewServeMux()
+		mux.Handle("/receiver", processor)
+		server := &http.Server{Addr: fmt.Sprintf(":%v", opts.listenPort), Handler: mux}
+
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen:%+s\n", err)
+			}
+		}()
+		log.Printf("Listening on port %v\n", opts.listenPort)
+
+		<-cmd.Context().Done()
+
+		log.Printf("server stopped")
+
+		ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer func() {
+			cancel()
+		}()
+
+		if err := server.Shutdown(ctxShutDown); err != nil {
+			log.Fatalf("server Shutdown Failed:%+s", err)
+		}
+		log.Printf("server exited properly")
 	}
 
 	defer cancel()
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
+	signal.Notify(sigs, os.Interrupt)
 	go func() {
 		<-sigs
-		fmt.Fprintln(os.Stderr, "\nAborted...")
+		log.Printf("Aborted signal received ...")
 		cancel()
 	}()
 
 	if err := cmd.ExecuteContext(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		log.Fatalf("%v\n", err)
 		os.Exit(1)
 	}
 }
